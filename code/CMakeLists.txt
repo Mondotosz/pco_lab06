@@ -1,32 +1,18 @@
-cmake_minimum_required(VERSION 3.5)
-project(PROG_LAB05 LANGUAGES CXX)
+cmake_minimum_required(VERSION 3.13)
+project(PCO_LAB05)
 
 set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-include_directories(${CMAKE_SOURCE_DIR}/include)
-
-find_package(GTest REQUIRED)
-find_package(benchmark REQUIRED)
+# Liste des fichiers sources avec chemins complets
+set(SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/tst_threadpool.cpp
+)
 
 set(HEADERS
-    ${CMAKE_CURRENT_SOURCE_DIR}/include/multithreadedsort.h
-    ${CMAKE_CURRENT_SOURCE_DIR}/include/quicksort.h
-    ${CMAKE_CURRENT_SOURCE_DIR}/include/utils.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/threadpool.h
 )
 
-add_executable(PCO_LAB05_tests ${CMAKE_CURRENT_SOURCE_DIR}/tests/main.cpp ${HEADERS})
-add_executable(PCO_LAB05_benchmarks ${CMAKE_CURRENT_SOURCE_DIR}/benchmarks/main.cpp ${HEADERS})
 
-target_link_libraries(PCO_LAB05_tests PRIVATE GTest::GTest GTest::Main -lpcosynchro)
-target_link_libraries(PCO_LAB05_benchmarks PRIVATE benchmark::benchmark -lpcosynchro)
+add_executable(PCO_LAB06 ${SOURCES} ${HEADERS})
+target_link_libraries(PCO_LAB06 PRIVATE gtest -lpcosynchro)
 
-include(GNUInstallDirs)
-install(TARGETS PCO_LAB05_tests
-    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
-    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
-)
-install(TARGETS PCO_LAB05_benchmarks
-    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
-    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
-)
