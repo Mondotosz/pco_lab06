@@ -8,8 +8,7 @@
 #include <cassert>
 #include <pcosynchro/pcologger.h>
 #include <pcosynchro/pcothread.h>
-#include <pcosynchro/pcomutex.h>
-#include <pcosynchro/pcoconditionvariable.h>
+#include <pcosynchro/pcohoaremonitor.h>
 
 class Runnable {
 public:
