@@ -43,7 +43,10 @@ public:
 
         // Request stop on all threads
         for (auto it = threads.begin(); it != threads.end(); ++it) {
-            it->second->requestStop();
+            it->second.thread->requestStop();
+        }
+
+        for (auto it = threads.begin(); it != threads.end(); ++it) {
             signal(cond);
         }
 
@@ -51,7 +54,7 @@ public:
 
         // Wait for the threads to stop properly
         for (auto it = threads.begin(); it != threads.end(); ++it) {
-            it->second->join();
+            it->second.thread->join();
         }
 
         // TODO: rest of the cleanup
@@ -70,19 +73,19 @@ public:
         monitorIn();
         if (nbAvailable > queue.size()) {
             // NOTE: A thread can handle the runnable
-
-            // TODO: add to queue and signal
+            queue.push(std::move(runnable));
+            signal(cond);
         } else if (threads.size() < maxThreadCount) {
             // NOTE: A thread can be created to handle the runnable
 
-            std::unique_ptr<PcoThread> thread
-                = std::make_unique<PcoThread>(&ThreadPool::worker, this, runnable);
-            threads.insert(std::pair{thread.get(), std::move(thread)});
+            queue.push(std::move(runnable));
+            worker_t tmp{std::make_unique<PcoThread>(&ThreadPool::worker, this)};
+            threads.insert(std::pair{tmp.thread.get(), std::move(tmp)});
 
         } else if (queue.size() < maxNbWaiting) {
             // NOTE: We still have space in the queue
-
-            // TODO: add to the queue and signal
+            queue.push(std::move(runnable));
+            signal(cond);
         } else {
             monitorOut();
             // If none of the above actions are available, default to refusing the
@@ -97,11 +100,7 @@ public:
     /* Returns the number of currently running threads. They do not need to be executing a task,
      * just to be alive.
      */
-    size_t currentNbThreads()
-    {
-        // TODO:
-        return 0;
-    }
+    size_t currentNbThreads() { return threads.size(); }
 
 private:
     size_t maxThreadCount;
@@ -110,22 +109,44 @@ private:
     Condition cond;
     std::chrono::milliseconds idleTimeout;
 
+    struct worker_t
+    {
+        std::unique_ptr<PcoThread> thread;
+    };
+
     /**
     * A map to store the threads, that way the workers can remove themselves from
     * the map before returning. We can't use a set since we need a unique_ptr to
     * automatically free the pointer and we can't use a unique_ptr as a key
     */
-    std::map<PcoThread *, std::unique_ptr<PcoThread>> threads;
+    std::map<PcoThread *, worker_t> threads;
 
     std::queue<std::unique_ptr<Runnable>> queue;
 
-    void worker(std::unique_ptr<Runnable> runnable)
+    void worker()
     {
-        runnable->run();
-        auto _ = runnable.release();
-
         while (true) {
+            monitorIn();
+
+            while (queue.empty() && !PcoThread::thisThread()->stopRequested()) {
+                wait(cond);
+            }
+
+            if (PcoThread::thisThread()->stopRequested()) {
+                break;
+            }
+
+            std::unique_ptr<Runnable> runnable = std::move(queue.front());
+            queue.pop();
+
+            monitorOut();
+
+            runnable->run();
         }
+
+        // TODO: erase in the timer
+        //threads.erase(PcoThread::thisThread());
+        monitorOut();
     }
 };
 
