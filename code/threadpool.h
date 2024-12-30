@@ -1,11 +1,8 @@
 #ifndef THREADPOOL_H
 #define THREADPOOL_H
 
-#include <algorithm>
 #include <atomic>
 #include <cassert>
-#include <chrono>
-#include <iostream>
 #include <map>
 #include <memory>
 #include <pcosynchro/pcohoaremonitor.h>
@@ -13,12 +10,15 @@
 #include <pcosynchro/pcomanager.h>
 #include <pcosynchro/pcosemaphore.h>
 #include <pcosynchro/pcothread.h>
-#include <set>
-#include <stack>
 #include <thread>
 #include <utility>
-#include <vector>
 #include <queue>
+
+#define LOG_TIMER 0
+#define LOG_DEL 0
+#define LOG_WORK 0
+#define LOG_IN_OUT 1
+#define LOG_TASKS 1
 
 class Runnable
 {
@@ -44,27 +44,53 @@ public:
 
     ~ThreadPool()
     {
+        // NOTE: we cannot call join within a monitor and we don't need to be
+        // within the monitor to stop the timer.
         timer_thread->requestStop();
         timer_thread->join();
 
         monitorIn();
-        std::cout << "[~TheadPool] begin" << std::endl;
+#if LOG_DEL > 1
+        PcoLogger() << "[~TheadPool] begin" << std::endl;
+#endif
 
         for (auto it = threads.begin(); it != threads.end(); ++it) {
+#if LOG_DEL > 2
+            PcoLogger() << "[~TheadPool] requestStop on: " << it->first << std::endl;
+#endif
             it->second.thread->requestStop();
-            if (it->second.waiting) {
-                signal(*it->second.cond);
-            }
+            // doesn't matter if the worker is waiting or not, signal() will
+            // check by itself.
+            signal(*it->second.cond);
         }
 
-        std::cout << "[~TheadPool] middle" << std::endl;
+#if LOG_DEL > 1
+        PcoLogger() << "[~TheadPool] middle" << std::endl;
+        PcoLogger() << "[~TheadPool] nb threads: " << threads.size() << std::endl;
 
-        for (auto it = threads.begin(); it != threads.end(); ++it) {
-            it->second.thread->join();
-        }
-        std::cout << "[~TheadPool] end" << std::endl;
+        PcoLogger() << "[~TheadPool] queue.size(): " << queue.size() << std::endl;
+        PcoLogger() << "[~TheadPool] nbAvailable: " << nbAvailable << std::endl;
+#endif
 
         monitorOut();
+
+#if LOG_IN_OUT
+        PcoLogger() << "[~TheadPool] nb in/out: " << in << "/" << out << std::endl;
+#endif
+
+#if LOG_TASKS
+        PcoLogger() << "[~TheadPool] tasks accepted/refused/executed: " << accepted << "/"
+                    << refused << "/" << executed << std::endl;
+#endif
+        for (auto it = threads.begin(); it != threads.end(); ++it) {
+#if LOG_DEL > 2
+            PcoLogger() << "[~TheadPool] joining thread: " << it->first << std::endl;
+#endif
+            it->second.thread->join();
+        }
+#if LOG_DEL
+        PcoLogger() << "[~TheadPool] end" << std::endl;
+#endif
     }
 
     /*
@@ -79,11 +105,17 @@ public:
     {
         monitorIn();
         if (queue.size() >= maxNbWaiting) {
-            // No place left
+// No place left
+#if LOG_TASKS
+            ++refused;
+#endif
             monitorOut();
             return false;
         }
 
+#if LOG_TASKS
+        ++accepted;
+#endif
         queue.push(std::move(runnable));
 
         if (nbAvailable > queue.size()) {
@@ -91,6 +123,7 @@ public:
             for (auto it = threads.begin(); it != threads.end(); ++it) {
                 if (it->second.waiting) {
                     signal(*it->second.cond);
+                    break;
                 }
             }
         } else if (threads.size() < maxThreadCount) {
@@ -102,7 +135,8 @@ public:
                     .thread = std::make_unique<PcoThread>(&ThreadPool::worker, this, id),
                     .cond = std::make_unique<Condition>(),
                     .waiting = false,
-                    .timeout = {}}});
+                    .timeout = {},
+                    .timed_out = false}});
         }
 
         // NOTE: default action is just queuing since a worker will take the
@@ -128,13 +162,25 @@ private:
     size_t nbAvailable;
     size_t next_thread_id = 0;
     std::chrono::milliseconds idleTimeout;
+    std::atomic<size_t> in{0};
+    std::atomic<size_t> out{0};
 
+    /**
+     * Contains everything that's necessary to know the status of a worker and
+     * interact with it
+     */
     struct worker_t
     {
         std::unique_ptr<PcoThread> thread;
         std::unique_ptr<Condition> cond;
+        // technically the Condition knows if a thread is waiting but it's
+        // private and we can't modify the class so we need to manage this info
+        // here
         bool waiting;
         TimePoint timeout;
+        // used to distinguish between timeout and stop request
+        // TODO: check if it's needed and maybe reset it ?
+        bool timed_out;
     };
 
     /**
@@ -148,6 +194,24 @@ private:
 
     std::unique_ptr<PcoThread> timer_thread;
 
+    std::size_t accepted = 0;
+    std::size_t refused = 0;
+    std::size_t executed = 0;
+
+#if LOG_IN_OUT
+    void monitorIn()
+    {
+        PcoHoareMonitor::monitorIn();
+        ++in;
+    }
+
+    void monitorOut()
+    {
+        ++out;
+        PcoHoareMonitor::monitorOut();
+    }
+#endif
+
     void worker(size_t id)
     {
         monitorIn();
@@ -157,28 +221,53 @@ private:
         while (true) {
             monitorIn();
 
-            std::cout << "[worker" << id << "]" << "in" << std::endl;
+#if LOG_WORK > 2
+            PcoLogger() << "[worker" << id << "]" << "in" << std::endl;
+#endif
             wrkr.timeout = Clock::now() + idleTimeout;
 
-            while (queue.empty() && !PcoThread::thisThread()->stopRequested()) {
+            if (PcoThread::thisThread()->stopRequested()) {
+#if LOG_WORK
+                PcoLogger() << "[worker" << id << "]" << "stop requested before" << std::endl;
+#endif
+            }
+
+            while (queue.empty() && !wrkr.timed_out && !PcoThread::thisThread()->stopRequested()) {
                 wrkr.waiting = true;
                 ++nbAvailable;
                 wait(*wrkr.cond);
                 --nbAvailable;
                 wrkr.waiting = false;
+
+#if LOG_WORK
+                if (PcoThread::thisThread()->stopRequested()) {
+                    PcoLogger() << "[worker" << id << "]" << "stop in before" << std::endl;
+                }
+
+                if (wrkr.timed_out) {
+                    PcoLogger() << "[worker" << id << "]" << "timed out" << std::endl;
+                }
+#endif
             }
 
-            if (PcoThread::thisThread()->stopRequested()) {
+            // NOTE: we still check if the queue is empty since we probably
+            // shouldn't leave jobs that we promised to treat
+            if (PcoThread::thisThread()->stopRequested() || wrkr.timed_out) {
                 break;
             }
 
             std::unique_ptr<Runnable> runnable = std::move(queue.front());
             queue.pop();
 
-            std::cout << "[worker" << id << "]" << "out" << std::endl;
+#if LOG_WORK > 2
+            PcoLogger() << "[worker" << id << "]" << "out" << std::endl;
+#endif
             monitorOut();
 
             runnable->run();
+#if LOG_TASKS
+            ++executed;
+#endif
         }
 
         monitorOut();
@@ -189,41 +278,68 @@ private:
         while (true) {
             monitorIn();
 
-            std::cout << "[timer]" << "in" << std::endl;
+#if LOG_TIMER > 2
+            PcoLogger() << "[timer]" << "in" << std::endl;
+#endif
             if (PcoThread::thisThread()->stopRequested()) {
-                std::cout << "[timer]" << "break" << std::endl;
+#if LOG_TIMER
+                PcoLogger() << "[timer]" << "break" << std::endl;
+#endif
                 break;
             }
 
             std::queue<size_t> deleted{};
 
-            std::cout << "[timer]" << "iterating" << std::endl;
+#if LOG_TIMER > 1
+            PcoLogger() << "[timer]" << "iterating" << std::endl;
+#endif
             for (auto it = threads.begin(); it != threads.end(); ++it) {
                 if (it->second.waiting && it->second.timeout < Clock::now()) {
                     deleted.push(it->first);
-                    it->second.thread->requestStop();
+                    it->second.timed_out = true;
 
-                    std::cout << "[timer]" << "<signal" << std::endl;
+#if LOG_TIMER
+                    PcoLogger() << "[timer]" << "<signal" << std::endl;
+#endif
                     signal(*it->second.cond);
-                    std::cout << "[timer]" << "signal>" << std::endl;
+#if LOG_TIMER
+                    PcoLogger() << "[timer]" << "signal>" << std::endl;
+#endif
                 }
             }
 
-            std::cout << "[timer]" << "releasing" << std::endl;
+#if LOG_TIMER > 1
+            PcoLogger() << "[timer]" << "releasing" << std::endl;
+#endif
             while (!deleted.empty()) {
                 auto it = threads.find(deleted.front());
+                // TODO: Check if there is issues with the  code below
                 it->second.thread->join();
                 auto _ = it->second.thread.release();
                 deleted.pop();
                 threads.erase(it);
             }
 
-            std::cout << "[timer]" << "out" << std::endl;
+            // NOTE: finding the next timing to wakeup
+            TimePoint until = Clock::now() + idleTimeout;
+            for (auto it = threads.begin(); it != threads.end(); ++it) {
+                if (!it->second.waiting || it->second.timed_out) {
+                    continue;
+                }
+
+                if (until > it->second.timeout) {
+                    until = it->second.timeout;
+                }
+            }
+
+#if LOG_TIMER > 2
+            PcoLogger() << "[timer]" << "out" << std::endl;
+#endif
             monitorOut();
 
-            // sleep for half a timing. Less precise but avoids issues for now
-            std::this_thread::sleep_for(idleTimeout / 2);
+            std::this_thread::sleep_until(until);
         }
+
         monitorOut();
     }
 };
