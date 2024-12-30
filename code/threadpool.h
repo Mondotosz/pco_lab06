@@ -11,6 +11,7 @@
 #include <pcosynchro/pcohoaremonitor.h>
 #include <pcosynchro/pcologger.h>
 #include <pcosynchro/pcomanager.h>
+#include <pcosynchro/pcosemaphore.h>
 #include <pcosynchro/pcothread.h>
 #include <set>
 #include <stack>
@@ -38,43 +39,32 @@ public:
         , threads()
         , queue()
         , nbAvailable(0)
-        , deleting(false)
         , timer_thread(std::make_unique<PcoThread>(&ThreadPool::timer, this))
-        , timer_waiting(false)
     {}
 
     ~ThreadPool()
     {
-        monitorIn();
-
-        // TODO: Stop and join the timer first to ensure that there is no way
-        // for the threads map to be updated
-
-        deleting = true;
-
         timer_thread->requestStop();
-        signal(timer_cond);
         timer_thread->join();
 
-        // Request stop on all threads
+        monitorIn();
+        std::cout << "[~TheadPool] begin" << std::endl;
+
         for (auto it = threads.begin(); it != threads.end(); ++it) {
             it->second.thread->requestStop();
+            if (it->second.waiting) {
+                signal(*it->second.cond);
+            }
         }
 
-        for (auto it = threads.begin(); it != threads.end(); ++it) {
-            signal(cond);
-        }
+        std::cout << "[~TheadPool] middle" << std::endl;
 
-        // NOTE: we can safely leave the monitor since we are joining every
-        // thread before interacting with shared data
-        monitorOut();
-
-        // Wait for the threads to stop properly
         for (auto it = threads.begin(); it != threads.end(); ++it) {
             it->second.thread->join();
         }
+        std::cout << "[~TheadPool] end" << std::endl;
 
-        // TODO: rest of the cleanup
+        monitorOut();
     }
 
     /*
@@ -88,27 +78,35 @@ public:
     bool start(std::unique_ptr<Runnable> runnable)
     {
         monitorIn();
-        if (nbAvailable > queue.size()) {
-            // NOTE: A thread can handle the runnable
-            queue.push(std::move(runnable));
-            signal(cond);
-        } else if (threads.size() < maxThreadCount) {
-            // NOTE: A thread can be created to handle the runnable
-
-            queue.push(std::move(runnable));
-            worker_t tmp{std::make_unique<PcoThread>(&ThreadPool::worker, this)};
-            threads.insert(std::pair{tmp.thread.get(), std::move(tmp)});
-
-        } else if (queue.size() < maxNbWaiting) {
-            // NOTE: We still have space in the queue
-            queue.push(std::move(runnable));
-            signal(cond);
-        } else {
+        if (queue.size() >= maxNbWaiting) {
+            // No place left
             monitorOut();
-            // If none of the above actions are available, default to refusing the
-            // task
             return false;
         }
+
+        queue.push(std::move(runnable));
+
+        if (nbAvailable > queue.size()) {
+            // NOTE: A worker is available
+            for (auto it = threads.begin(); it != threads.end(); ++it) {
+                if (it->second.waiting) {
+                    signal(*it->second.cond);
+                }
+            }
+        } else if (threads.size() < maxThreadCount) {
+            // NOTE: We can still create more threads
+            size_t id = next_thread_id++;
+            threads.insert(std::pair{
+                id,
+                worker_t{
+                    .thread = std::make_unique<PcoThread>(&ThreadPool::worker, this, id),
+                    .cond = std::make_unique<Condition>(),
+                    .waiting = false,
+                    .timeout = {}}});
+        }
+
+        // NOTE: default action is just queuing since a worker will take the
+        // job when available
 
         monitorOut();
         return true;
@@ -122,19 +120,21 @@ public:
 private:
     typedef typename std::chrono::steady_clock Clock;
     typedef typename std::chrono::time_point<Clock> TimePoint;
-    typedef typename ::PcoThread *Key;
-    typedef typename std::pair<PcoThread *, TimePoint> TimeOutNode;
+    typedef typename ::size_t Key;
+    typedef typename std::pair<PcoThread *, std::pair<TimePoint, Condition *>> TimeOutNode;
 
     size_t maxThreadCount;
     size_t maxNbWaiting;
     size_t nbAvailable;
-    Condition cond;
-    Condition timer_cond;
+    size_t next_thread_id = 0;
     std::chrono::milliseconds idleTimeout;
 
     struct worker_t
     {
         std::unique_ptr<PcoThread> thread;
+        std::unique_ptr<Condition> cond;
+        bool waiting;
+        TimePoint timeout;
     };
 
     /**
@@ -144,44 +144,29 @@ private:
     */
     std::map<Key, worker_t> threads;
 
-    std::map<Key, TimePoint> timeouts;
-
     std::queue<std::unique_ptr<Runnable>> queue;
 
     std::unique_ptr<PcoThread> timer_thread;
 
-    bool deleting;
-    bool timer_waiting;
-
-    void worker()
+    void worker(size_t id)
     {
-        static std::atomic<size_t> snum = 0;
-        size_t num = snum++;
+        monitorIn();
+        worker_t &wrkr = threads.at(id);
+        monitorOut();
+
         while (true) {
             monitorIn();
 
-            // std::cout << "[worker" << num << "] In" << std::endl;
-            // Set the timeout
-            TimePoint timeout = Clock::now() + idleTimeout;
-            timeouts.insert(std::pair{PcoThread::thisThread(), timeout});
+            std::cout << "[worker" << id << "]" << "in" << std::endl;
+            wrkr.timeout = Clock::now() + idleTimeout;
 
             while (queue.empty() && !PcoThread::thisThread()->stopRequested()) {
-                std::cout << "[worker" << num << "] waiting" << std::endl;
-                if (timer_waiting) {
-                    std::cout << "[worker" << num << "] Signaling timer" << std::endl;
-                    signal(timer_cond);
-                }
+                wrkr.waiting = true;
                 ++nbAvailable;
-                wait(cond);
+                wait(*wrkr.cond);
                 --nbAvailable;
-                if (Clock::now() > timeout) {
-                    std::cout << "[worker" << num << "] requesting self stop" << std::endl;
-                    PcoThread::thisThread()->requestStop();
-                }
+                wrkr.waiting = false;
             }
-
-            // Erase the timeout now that we've got a task or got canceled
-            timeouts.erase(PcoThread::thisThread());
 
             if (PcoThread::thisThread()->stopRequested()) {
                 break;
@@ -190,73 +175,54 @@ private:
             std::unique_ptr<Runnable> runnable = std::move(queue.front());
             queue.pop();
 
-            std::cout << "[worker" << num << "] out" << std::endl;
+            std::cout << "[worker" << id << "]" << "out" << std::endl;
             monitorOut();
 
             runnable->run();
-            std::cout << "[worker" << num << "] ran" << std::endl;
         }
 
-        std::cout << "[worker" << num << "] exiting" << std::endl;
-        if (!deleting) {
-            std::cout << "[worker" << num << "] erasing" << std::endl;
-            auto _ = threads.at(PcoThread::thisThread()).thread.release();
-            threads.erase(PcoThread::thisThread());
-        }
         monitorOut();
-        std::cout << "[worker" << num << "] exited" << std::endl;
     }
 
     void timer()
     {
-        std::atomic<size_t> u = 0;
         while (true) {
             monitorIn();
 
-            std::cout << "[timer] loop: " << u++ << std::endl;
-            while (timeouts.empty() && !PcoThread::thisThread()->stopRequested()) {
-                timer_waiting = true;
-                wait(timer_cond);
-                timer_waiting = false;
-                std::cout << "[timer] signaled" << std::endl;
-            }
-            std::cout << "[timer] passed cond" << std::endl;
-
+            std::cout << "[timer]" << "in" << std::endl;
             if (PcoThread::thisThread()->stopRequested()) {
+                std::cout << "[timer]" << "break" << std::endl;
                 break;
             }
-            std::cout << "[timer] passed stop requested" << std::endl;
 
-            // Get the next timeout
-            auto end = timeouts.end();
-            auto m = std::min_element(timeouts.begin(), end, [](TimeOutNode lhs, TimeOutNode rhs) {
-                return lhs.second < rhs.second;
-            });
+            std::queue<size_t> deleted{};
 
-            std::cout << "[timer] first monitorOut" << std::endl;
-            monitorOut();
+            std::cout << "[timer]" << "iterating" << std::endl;
+            for (auto it = threads.begin(); it != threads.end(); ++it) {
+                if (it->second.waiting && it->second.timeout < Clock::now()) {
+                    deleted.push(it->first);
+                    it->second.thread->requestStop();
 
-            if (m == end) {
-                // NOTE: Something went wrong I guess
-                std::cerr << "something went wrong" << std::endl;
-                continue;
+                    std::cout << "[timer]" << "<signal" << std::endl;
+                    signal(*it->second.cond);
+                    std::cout << "[timer]" << "signal>" << std::endl;
+                }
             }
 
-            // sleep_until next timeout
-            // NOTE: not sure if we should check that the time is valid
-            std::this_thread::sleep_until(m->second);
-            std::cout << "[timer] slept" << std::endl;
-
-            monitorIn();
-            std::cout << "[timer] second monitorIn" << std::endl;
-            // awaken all threads since we can't target a specific thread with
-            // the current implementation.
-            // WARN: potentially really bad ?
-            for (size_t i = 0; i < nbAvailable; ++i) {
-                signal(cond);
+            std::cout << "[timer]" << "releasing" << std::endl;
+            while (!deleted.empty()) {
+                auto it = threads.find(deleted.front());
+                it->second.thread->join();
+                auto _ = it->second.thread.release();
+                deleted.pop();
+                threads.erase(it);
             }
-            std::cout << "[timer] second monitorOut" << std::endl;
+
+            std::cout << "[timer]" << "out" << std::endl;
             monitorOut();
+
+            // sleep for half a timing. Less precise but avoids issues for now
+            std::this_thread::sleep_for(idleTimeout / 2);
         }
         monitorOut();
     }
