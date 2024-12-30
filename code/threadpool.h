@@ -40,7 +40,7 @@ public:
         , nbAvailable(0)
         , deleting(false)
         , timer_thread(std::make_unique<PcoThread>(&ThreadPool::timer, this))
-        , timer_sleeping(false)
+        , timer_waiting(false)
     {}
 
     ~ThreadPool()
@@ -151,7 +151,7 @@ private:
     std::unique_ptr<PcoThread> timer_thread;
 
     bool deleting;
-    bool timer_sleeping;
+    bool timer_waiting;
 
     void worker()
     {
@@ -166,14 +166,16 @@ private:
             timeouts.insert(std::pair{PcoThread::thisThread(), timeout});
 
             while (queue.empty() && !PcoThread::thisThread()->stopRequested()) {
-                // std::cout << "[worker" << num << "] waiting" << std::endl;
-                if (timer_sleeping) {
-                    // std::cout << "[worker" << num << "] Signaling timer" << std::endl;
+                std::cout << "[worker" << num << "] waiting" << std::endl;
+                if (timer_waiting) {
+                    std::cout << "[worker" << num << "] Signaling timer" << std::endl;
                     signal(timer_cond);
                 }
+                ++nbAvailable;
                 wait(cond);
+                --nbAvailable;
                 if (Clock::now() > timeout) {
-                    // std::cout << "[worker" << num << "] requesting self stop" << std::endl;
+                    std::cout << "[worker" << num << "] requesting self stop" << std::endl;
                     PcoThread::thisThread()->requestStop();
                 }
             }
@@ -188,21 +190,21 @@ private:
             std::unique_ptr<Runnable> runnable = std::move(queue.front());
             queue.pop();
 
-            // std::cout << "[worker" << num << "] out" << std::endl;
+            std::cout << "[worker" << num << "] out" << std::endl;
             monitorOut();
 
             runnable->run();
-            // std::cout << "[worker" << num << "] ran" << std::endl;
+            std::cout << "[worker" << num << "] ran" << std::endl;
         }
 
-        // std::cout << "[worker" << num << "] exiting" << std::endl;
-        // TODO: erase in the timer
+        std::cout << "[worker" << num << "] exiting" << std::endl;
         if (!deleting) {
-            // std::cout << "[worker" << num << "] erasing" << std::endl;
+            std::cout << "[worker" << num << "] erasing" << std::endl;
+            auto _ = threads.at(PcoThread::thisThread()).thread.release();
             threads.erase(PcoThread::thisThread());
         }
         monitorOut();
-        // std::cout << "[worker" << num << "] exited" << std::endl;
+        std::cout << "[worker" << num << "] exited" << std::endl;
     }
 
     void timer()
@@ -211,17 +213,19 @@ private:
         while (true) {
             monitorIn();
 
-            // std::cout << "[timer] loop: " << u++ << std::endl;
+            std::cout << "[timer] loop: " << u++ << std::endl;
             while (timeouts.empty() && !PcoThread::thisThread()->stopRequested()) {
+                timer_waiting = true;
                 wait(timer_cond);
-                // std::cout << "[timer] signaled" << std::endl;
+                timer_waiting = false;
+                std::cout << "[timer] signaled" << std::endl;
             }
-            // std::cout << "[timer] passed cond" << std::endl;
+            std::cout << "[timer] passed cond" << std::endl;
 
             if (PcoThread::thisThread()->stopRequested()) {
                 break;
             }
-            // std::cout << "[timer] passed stop requested" << std::endl;
+            std::cout << "[timer] passed stop requested" << std::endl;
 
             // Get the next timeout
             auto end = timeouts.end();
@@ -229,8 +233,7 @@ private:
                 return lhs.second < rhs.second;
             });
 
-            // std::cout << "[timer] first monitorOut" << std::endl;
-            timer_sleeping = true;
+            std::cout << "[timer] first monitorOut" << std::endl;
             monitorOut();
 
             if (m == end) {
@@ -242,19 +245,17 @@ private:
             // sleep_until next timeout
             // NOTE: not sure if we should check that the time is valid
             std::this_thread::sleep_until(m->second);
-            // std::cout << "[timer] slept" << std::endl;
+            std::cout << "[timer] slept" << std::endl;
 
             monitorIn();
-
-            timer_sleeping = false;
-            // std::cout << "[timer] second monitorIn" << std::endl;
+            std::cout << "[timer] second monitorIn" << std::endl;
             // awaken all threads since we can't target a specific thread with
             // the current implementation.
             // WARN: potentially really bad ?
-            for (size_t i = 0; i < threads.size(); ++i) {
+            for (size_t i = 0; i < nbAvailable; ++i) {
                 signal(cond);
             }
-            // std::cout << "[timer] second monitorOut" << std::endl;
+            std::cout << "[timer] second monitorOut" << std::endl;
             monitorOut();
         }
         monitorOut();
