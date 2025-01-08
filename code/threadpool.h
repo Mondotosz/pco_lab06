@@ -3,6 +3,7 @@
 
 #include <atomic>
 #include <cassert>
+#include <chrono>
 #include <map>
 #include <memory>
 #include <pcosynchro/pcohoaremonitor.h>
@@ -78,16 +79,16 @@ public:
         PcoLogger() << "[~TheadPool] nb in/out: " << in << "/" << out << std::endl;
 #endif
 
-#if LOG_TASKS
-        PcoLogger() << "[~TheadPool] tasks accepted/refused/executed: " << accepted << "/"
-                    << refused << "/" << executed << std::endl;
-#endif
         for (auto it = threads.begin(); it != threads.end(); ++it) {
 #if LOG_DEL > 2
             PcoLogger() << "[~TheadPool] joining thread: " << it->first << std::endl;
 #endif
             it->second.thread->join();
         }
+#if LOG_TASKS
+        PcoLogger() << "[~TheadPool] tasks accepted/refused/executed: " << accepted << "/"
+                    << refused << "/" << executed << std::endl;
+#endif
 #if LOG_DEL
         PcoLogger() << "[~TheadPool] end" << std::endl;
 #endif
@@ -110,6 +111,7 @@ public:
             ++refused;
 #endif
             monitorOut();
+            runnable->cancelRun();
             return false;
         }
 
@@ -224,15 +226,15 @@ private:
 #if LOG_WORK > 2
             PcoLogger() << "[worker" << id << "]" << "in" << std::endl;
 #endif
-            wrkr.timeout = Clock::now() + idleTimeout;
 
-            if (PcoThread::thisThread()->stopRequested()) {
 #if LOG_WORK
+            if (PcoThread::thisThread()->stopRequested()) {
                 PcoLogger() << "[worker" << id << "]" << "stop requested before" << std::endl;
-#endif
             }
+#endif
 
             if (queue.empty() && !wrkr.timed_out && !PcoThread::thisThread()->stopRequested()) {
+                wrkr.timeout = Clock::now() + idleTimeout;
                 wrkr.waiting = true;
                 ++nbAvailable;
                 wait(*wrkr.cond);
@@ -252,7 +254,7 @@ private:
 
             // NOTE: we still check if the queue is empty since we probably
             // shouldn't leave jobs that we promised to treat
-            if (PcoThread::thisThread()->stopRequested() || wrkr.timed_out) {
+            if ((PcoThread::thisThread()->stopRequested() && queue.empty()) || wrkr.timed_out) {
                 break;
             }
 
