@@ -129,14 +129,14 @@ public:
         } else if (threads.size() < maxThreadCount) {
             // NOTE: We can still create more threads
             size_t id = next_thread_id++;
-            threads.insert(std::pair{
+            threads.emplace(
                 id,
                 worker_t{
                     .thread = std::make_unique<PcoThread>(&ThreadPool::worker, this, id),
                     .cond = std::make_unique<Condition>(),
                     .waiting = false,
                     .timeout = {},
-                    .timed_out = false}});
+                    .timed_out = false});
         }
 
         // NOTE: default action is just queuing since a worker will take the
@@ -232,7 +232,7 @@ private:
 #endif
             }
 
-            while (queue.empty() && !wrkr.timed_out && !PcoThread::thisThread()->stopRequested()) {
+            if (queue.empty() && !wrkr.timed_out && !PcoThread::thisThread()->stopRequested()) {
                 wrkr.waiting = true;
                 ++nbAvailable;
                 wait(*wrkr.cond);
@@ -315,7 +315,8 @@ private:
                 auto it = threads.find(deleted.front());
                 // TODO: Check if there is issues with the  code below
                 it->second.thread->join();
-                auto _ = it->second.thread.release();
+                it->second.thread.reset();
+                it->second.cond.reset();
                 deleted.pop();
                 threads.erase(it);
             }
