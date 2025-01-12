@@ -140,8 +140,8 @@ public:
             threads.emplace(
                 id,
                 worker_t{
-                    .thread = std::make_unique<PcoThread>(&ThreadPool::worker, this, id),
-                    .cond = std::make_unique<Condition>(),
+                    .thread = std::make_shared<PcoThread>(&ThreadPool::worker, this, id),
+                    .cond = std::make_shared<Condition>(),
                     .waiting = false,
                     .timeout = {},
                     .timed_out = false});
@@ -195,10 +195,10 @@ private:
     struct worker_t
     {
         // A pointer to the thread
-        std::unique_ptr<PcoThread> thread;
+        std::shared_ptr<PcoThread> thread;
         // A pointer to the condition that the thread will wait on and should be
         // used to wake it up
-        std::unique_ptr<Condition> cond;
+        std::shared_ptr<Condition> cond;
         // technically the Condition knows if a thread is waiting but it's
         // private and we can't modify the class so we need to manage this info
         // here
@@ -345,8 +345,6 @@ private:
                 auto it = threads.find(deleted.front());
                 // TODO: Check if there is issues with the  code below
                 it->second.thread->join();
-                it->second.thread.reset();
-                it->second.cond.reset();
                 deleted.pop();
                 threads.erase(it);
             }
