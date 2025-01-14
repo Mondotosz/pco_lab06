@@ -85,18 +85,20 @@ Classe ThreadPool :
     // Préparer les structures pour la gestion des threads
 
   démarrer(tâche) :
-    si (file pleine) alors rejeter(tâche)
-    sinon assigner_à_thread(tâche)
+    si (file pleine) alors rejeter(tâche) et retour negatif
+    sinon prise en charge de la tache avec reveil/creation de thread
 
   boucle_thread() :
     tant que (actif) :
-      si (délai dépassé) alors terminer_thread()
-      sinon exécuter_tâche()
+      si aucune tache ni demande d'arret alors attente
+      si demande d'arret alors arret
+      executer_tache()
 ```
 
 == Méthodes worker
 
-- **`worker_loop`** : Chaque thread attend une tâche ou termine après un délai d'inactivité.
+- *`worker`* : Chaque thread execute les tâches et s'arrête s'il ne reçoit pas
+  de tâches pendant le délai définis.
 
 *Pseudocode simplifié de la logique :*
 
@@ -128,24 +130,23 @@ L'implémentation évite les blocages grâce à l'utilisation de conditions de s
 
 == Scénarios de test
 
-Les tests incluent :
-
-1. Gestion de 10 tâches avec 10 threads.
-2. Surcharge de la file d'attente.
-3. Recyclage des threads inactifs.
-
-Pseudocode pour un test :
-
-#codly()
-```pseudocode
-pool = initialiser_pool(10, 50, 100ms)
-envoyer_tâches(pool, 10)
-vérifier(toutes_tâches_finies)
-```
+Nous avons utilisé les tests fournis avec la donnée du laboratoire donc:
+- les tâches sont bien toutes exécutés (10 tâches pour 10 threads)
+- les tâches sont bien toutes exécutée (100 tâches pour 10 threads avec une file supportant 100 tâches)
+- les tâches sont bien toutes exécutée (10 x 10 tâches avec attente entre chaque batch pour 10 threads avec une file max de 100 tâches)
+- les tâches ne pouvant pas être prise en charge sont refusées et annulées (30 tâches pour 10 threads et un maximum de 5 tâches en attente)
+- les threads sont bien libérés s'ils attendent plus que le délai donné
 
 == Résultats
 
 Les tests montrent que le pool respecte les limites et fonctionne efficacement dans des scénarios variés en respectant les contraintes de temps.
+
+#info[
+  Le test case 4 fonctionne la plupart du temps mais il arrive que le nombre de
+  tâches rejetées ne soit pas bon (17 ou 18 au lieu de 15.) Notamment, si on
+  essai de lancer plusieurs instances du programme en parallèle les tests ont
+  tendance à moins passer donc il s'agit probablement d'un problème de performances
+]
 
 = Remarques et conclusion
 
@@ -153,6 +154,8 @@ Les tests montrent que le pool respecte les limites et fonctionne efficacement d
 
 - Réduction des ressources consommées par les threads inactifs.
 - Ajout de métriques pour surveiller les performances.
+- Potentiellement utiliser une liste chainée et des itérateurs pour stocker les
+  informations relatives aux différents threads.
 
 == Conclusion
 
