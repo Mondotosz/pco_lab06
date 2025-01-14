@@ -49,7 +49,30 @@ Dans ce laboratoire, l'objectif était de concevoir et implémenter un pool de t
 
 = Implémentation et choix
 
-== Architecture des classes
+== Structure Générale du Code
+Runnable
+Une interface représentant une tâche exécutable :
+
+- `run()`: contient la logique à exécuter.
+- `cancelRun()`: permet d'annuler l'exécution.
+- `id()`: fournit un identifiant unique pour chaque tâche.
+ThreadPool
+La classe principale, utilisant un moniteur de Hoare pour gérer la synchronisation :
+
+*Constructeur :*
+
+- `maxThreadCount` : nombre maximum de threads dans le pool.
+- `maxNbWaiting` : taille maximale de la file d'attente.
+- `idleTimeout` : délai d'inactivité avant qu'un thread ne soit terminé. Un thread séparé (`timer_thread`) est initialisé pour surveiller les timeouts.
+
+*Méthodes :*
+
+- `start()` : Ajoute une tâche dans la file ou la rejette si elle est pleine. Si un thread est disponible, il traite immédiatement la tâche. Sinon, un nouveau thread est créé (si le pool n'a pas atteint sa capacité maximale).
+- `worker()` : Gère l'exécution des tâches pour chaque thread. Attend une tâche ou termine après un délai d'inactivité.
+- `timer()` : Surveille les threads inactifs et les termine lorsqu'ils dépassent idleTimeout.
+- `Destructeur` : Termine proprement les threads et libère les ressources associées.
+
+== Architecture de la classe
 
 La classe principale `ThreadPool` repose sur un moniteur de Hoare pour gérer la synchronisation. Les threads sont encapsulés dans une structure qui contient l'état de chaque thread (actif, en attente, ou expiré).
 
@@ -71,12 +94,11 @@ Classe ThreadPool :
       sinon exécuter_tâche()
 ```
 
-== Méthodes principales
+== Méthodes worker
 
-- **`start`** : Gère l'ajout de tâches. Si un thread est disponible, il exécute immédiatement la tâche. Sinon, la tâche est mise en file d'attente ou rejetée si la file est pleine.
 - **`worker_loop`** : Chaque thread attend une tâche ou termine après un délai d'inactivité.
 
-Pseudocode simplifié de la logique :
+*Pseudocode simplifié de la logique :*
 
 #codly()
 ```pseudocode
@@ -87,9 +109,20 @@ sinon si (temps_inactivité atteint) :
   terminer_thread()
 ```
 
+== Points Clés sur le Thread de Timeout
+*Gestion du Timeout dans le Thread Timer :*
+
+Le thread *`timer_thread`* parcourt les threads actifs.
+Si un thread est inactif et dépasse `idleTimeout`, il est marqué comme expiré (`timed_out`) et réveillé via un signal.
+Les threads expirés sont joints (avec join()) et supprimés de la liste.
+Découplage entre le Timer et les Workers :
+
+Les threads "workers" ne gèrent pas eux-mêmes leur timeout, ce qui simplifie leur logique.
+Le thread timer agit comme un observateur, surveillant les états des threads et agissant en conséquence.
+
 == Subtilités concurrentielles
 
-L'implémentation évite les blocages grâce à des conditions de synchronisation, garantissant un accès sûr aux données partagées. La destruction du pool est gérée proprement pour éviter les fuites de threads.
+L'implémentation évite les blocages grâce à l'utilisation de conditions de synchronisation, garantissant un accès sécurisé et cohérent aux données partagées. La destruction du pool est gérée avec rigueur pour prévenir toute fuite de threads. Une attention particulière a été portée au rejet des tâches impossibles à exécuter et à la terminaison propre des threads, notamment pour garantir la réussite des tests.
 
 = Tests
 
@@ -112,7 +145,7 @@ vérifier(toutes_tâches_finies)
 
 == Résultats
 
-Les tests montrent que le pool respecte les limites et fonctionne efficacement dans des scénarios variés.
+Les tests montrent que le pool respecte les limites et fonctionne efficacement dans des scénarios variés en respectant les contraintes de temps.
 
 = Remarques et conclusion
 
@@ -123,4 +156,4 @@ Les tests montrent que le pool respecte les limites et fonctionne efficacement d
 
 == Conclusion
 
-Ce projet illustre les principes de la programmation concurrente, offrant une solution robuste pour gérer les tâches dans des environnements à forte charge.
+Ce laboratoire a permis de concevoir un pool de threads capable de gérer des tâches concurrentes sous des contraintes strictes ; Telles que la limitation des threads actifs, la gestion d’une file d’attente et le recyclage des threads inactifs. L’utilisation d’un moniteur de Hoare et d’un thread dédié à la gestion des timeouts a assuré une synchronisation sécurisée. Les tests ont confirmé la conformité du système, offrant une solution adaptable à des environnements à charge variable.
