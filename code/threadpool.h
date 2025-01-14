@@ -1,8 +1,8 @@
 #ifndef THREADPOOL_H
 #define THREADPOOL_H
 
-#include <atomic>
 #include <cassert>
+#include <chrono>
 #include <map>
 #include <memory>
 #include <pcosynchro/pcohoaremonitor.h>
@@ -14,11 +14,16 @@
 #include <utility>
 #include <queue>
 
+// NOTE: could wrap this in #ifdef DEBUG
 #define LOG_TIMER 0
 #define LOG_DEL 0
 #define LOG_WORK 0
-#define LOG_IN_OUT 1
-#define LOG_TASKS 1
+#define LOG_IN_OUT 0
+#define LOG_TASKS 0
+
+#if LOG_IN_OUT
+#include <atomic>
+#endif
 
 class Runnable
 {
@@ -78,16 +83,16 @@ public:
         PcoLogger() << "[~TheadPool] nb in/out: " << in << "/" << out << std::endl;
 #endif
 
-#if LOG_TASKS
-        PcoLogger() << "[~TheadPool] tasks accepted/refused/executed: " << accepted << "/"
-                    << refused << "/" << executed << std::endl;
-#endif
         for (auto it = threads.begin(); it != threads.end(); ++it) {
 #if LOG_DEL > 2
             PcoLogger() << "[~TheadPool] joining thread: " << it->first << std::endl;
 #endif
             it->second.thread->join();
         }
+#if LOG_TASKS
+        PcoLogger() << "[~TheadPool] tasks accepted/refused/executed: " << accepted << "/"
+                    << refused << "/" << executed << std::endl;
+#endif
 #if LOG_DEL
         PcoLogger() << "[~TheadPool] end" << std::endl;
 #endif
@@ -110,15 +115,18 @@ public:
             ++refused;
 #endif
             monitorOut();
+            runnable->cancelRun();
             return false;
         }
 
 #if LOG_TASKS
         ++accepted;
 #endif
+        // Even if we create a new thread the queue is still the way that's used
+        // to give the task to the worker.
         queue.push(std::move(runnable));
 
-        if (nbAvailable > queue.size()) {
+        if (nbAvailable) {
             // NOTE: A worker is available
             for (auto it = threads.begin(); it != threads.end(); ++it) {
                 if (it->second.waiting) {
@@ -129,25 +137,29 @@ public:
         } else if (threads.size() < maxThreadCount) {
             // NOTE: We can still create more threads
             size_t id = next_thread_id++;
-            threads.insert(std::pair{
+            threads.emplace(
                 id,
                 worker_t{
-                    .thread = std::make_unique<PcoThread>(&ThreadPool::worker, this, id),
-                    .cond = std::make_unique<Condition>(),
+                    .thread = std::make_shared<PcoThread>(&ThreadPool::worker, this, id),
+                    .cond = std::make_shared<Condition>(),
                     .waiting = false,
                     .timeout = {},
-                    .timed_out = false}});
+                    .timed_out = false});
         }
 
         // NOTE: default action is just queuing since a worker will take the
         // job when available
+
+        // NOTE: the reason why we fail the 4th test might be due to the fact
+        // that workers that finished their task are in competition with whichever
+        // thread tries to add a new task when it comes to securing the mutex
 
         monitorOut();
         return true;
     }
 
     /* Returns the number of currently running threads. They do not need to be executing a task,
-     * just to be alive.
+     * just to be alive. (The watchdog isn't accounted for)
      */
     size_t currentNbThreads() { return threads.size(); }
 
@@ -157,13 +169,24 @@ private:
     typedef typename ::size_t Key;
     typedef typename std::pair<PcoThread *, std::pair<TimePoint, Condition *>> TimeOutNode;
 
+    // The maximum number of worker threads
     size_t maxThreadCount;
+    // The max number of tasks that can be stored in the queue
     size_t maxNbWaiting;
+    // The number of threads that are waiting for a task
     size_t nbAvailable;
+    // The next thread id to use in the map.
+    // NOTE: looking back, a circular buffer should have worked
     size_t next_thread_id = 0;
+    // The time before a waiting worker should be timed out
     std::chrono::milliseconds idleTimeout;
+
+#if LOG_IN_OUT
+    // The number of times monitorIn was called
     std::atomic<size_t> in{0};
+    // The number of times monitorOut was called
     std::atomic<size_t> out{0};
+#endif
 
     /**
      * Contains everything that's necessary to know the status of a worker and
@@ -171,15 +194,19 @@ private:
      */
     struct worker_t
     {
-        std::unique_ptr<PcoThread> thread;
-        std::unique_ptr<Condition> cond;
+        // A pointer to the thread
+        std::shared_ptr<PcoThread> thread;
+        // A pointer to the condition that the thread will wait on and should be
+        // used to wake it up
+        std::shared_ptr<Condition> cond;
         // technically the Condition knows if a thread is waiting but it's
         // private and we can't modify the class so we need to manage this info
         // here
         bool waiting;
+        // The time at which point it should be considered as timed out if still
+        // waiting
         TimePoint timeout;
         // used to distinguish between timeout and stop request
-        // TODO: check if it's needed and maybe reset it ?
         bool timed_out;
     };
 
@@ -190,13 +217,16 @@ private:
     */
     std::map<Key, worker_t> threads;
 
+    // The queue of tasks that cannot be executed straight away
     std::queue<std::unique_ptr<Runnable>> queue;
 
     std::unique_ptr<PcoThread> timer_thread;
 
+#if LOG_TASKS
     std::size_t accepted = 0;
     std::size_t refused = 0;
     std::size_t executed = 0;
+#endif
 
 #if LOG_IN_OUT
     void monitorIn()
@@ -224,15 +254,15 @@ private:
 #if LOG_WORK > 2
             PcoLogger() << "[worker" << id << "]" << "in" << std::endl;
 #endif
-            wrkr.timeout = Clock::now() + idleTimeout;
 
-            if (PcoThread::thisThread()->stopRequested()) {
 #if LOG_WORK
+            if (PcoThread::thisThread()->stopRequested()) {
                 PcoLogger() << "[worker" << id << "]" << "stop requested before" << std::endl;
-#endif
             }
+#endif
 
-            while (queue.empty() && !wrkr.timed_out && !PcoThread::thisThread()->stopRequested()) {
+            if (queue.empty() && !wrkr.timed_out && !PcoThread::thisThread()->stopRequested()) {
+                wrkr.timeout = Clock::now() + idleTimeout;
                 wrkr.waiting = true;
                 ++nbAvailable;
                 wait(*wrkr.cond);
@@ -252,7 +282,7 @@ private:
 
             // NOTE: we still check if the queue is empty since we probably
             // shouldn't leave jobs that we promised to treat
-            if (PcoThread::thisThread()->stopRequested() || wrkr.timed_out) {
+            if ((PcoThread::thisThread()->stopRequested() && queue.empty()) || wrkr.timed_out) {
                 break;
             }
 
@@ -315,7 +345,6 @@ private:
                 auto it = threads.find(deleted.front());
                 // TODO: Check if there is issues with the  code below
                 it->second.thread->join();
-                auto _ = it->second.thread.release();
                 deleted.pop();
                 threads.erase(it);
             }
