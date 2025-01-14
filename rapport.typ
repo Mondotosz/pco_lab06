@@ -1,12 +1,37 @@
-#import "@preview/ilm:1.4.0": * #import "@preview/gentle-clues:1.0.0": * #import "@preview/codly:1.0.0": *
+#import "@preview/ilm:1.4.0": *
+#import "@preview/gentle-clues:1.0.0": *
+#import "@preview/codly:1.0.0": *
 
-#show: ilm.with( title: [Rapport Labo 6], author: "Ali Zoubir & Kenan Augsburger", date: datetime.today(), )
+#show: ilm.with(
+  title: [Rapport Labo 6],
+  author: "Ali Zoubir & Kenan Augsburger",
+  date: datetime.today(),
+)
 
-#codly( languages: ( cpp: ( name: "cpp", icon: text(font: "JetBrainsMono NFP", " "), color: rgb("#ef4444") ) ) )
+#codly(
+  languages: (
+    cpp: (
+      name: "cpp",
+      icon: text(font: "JetBrainsMono NFP", " "),
+      color: rgb("#ef4444")
+    )
+  )
+)
+
+#codly(
+  languages: (
+    pseudocode: (
+      name: "pseudocode",
+      icon: text(font: "JetBrainsMono NFP", "ⓟ "),
+      color: rgb("#89caff")
+    )
+  )
+)
 
 #show: codly-init.with()
 
-#show link: underline #show raw: set text(font: "JetBrainsMono NFP")
+#show link: underline
+#show raw: set text(font: "JetBrainsMono NFP")
 
 = Informations sur le projet
 
@@ -26,37 +51,76 @@ Dans ce laboratoire, l'objectif était de concevoir et implémenter un pool de t
 
 == Architecture des classes
 
-La classe principale ThreadPool repose sur l'utilisation d'un moniteur de Hoare pour gérer la synchronisation et la communication entre les threads. Les threads sont encapsulés dans une structure worker_t comprenant des informations comme l'état d'attente, les conditions de synchronisation, et le temps d'expiration.
+La classe principale `ThreadPool` repose sur un moniteur de Hoare pour gérer la synchronisation. Les threads sont encapsulés dans une structure qui contient l'état de chaque thread (actif, en attente, ou expiré).
 
-#codly(languages: cpp)
-```cpp
-#include <thread> 
-#include <queue> ... 
+Pseudocode pour `ThreadPool` :
 
-class ThreadPool : public PcoHoareMonitor { public: ThreadPool(int maxThreadCount, int maxNbWaiting, std::chrono::milliseconds idleTimeout); bool start(std::unique_ptr<Runnable> runnable); size_t currentNbThreads(); ... }; ]
+#codly()
+```pseudocode
+Classe ThreadPool :
+  initialiser(max_threads, max_queue, timeout) :
+    // Préparer les structures pour la gestion des threads
 
+  démarrer(tâche) :
+    si (file pleine) alors rejeter(tâche)
+    sinon assigner_à_thread(tâche)
+
+  boucle_thread() :
+    tant que (actif) :
+      si (délai dépassé) alors terminer_thread()
+      sinon exécuter_tâche()
 ```
 
- == Méthodes clés
+== Méthodes principales
 
-Méthode start
-Cette méthode gère l'ajout des tâches. Si un thread est disponible, il traite la tâche immédiatement. Sinon, un nouveau thread est créé jusqu'à atteindre la limite maximale.
+- **`start`** : Gère l'ajout de tâches. Si un thread est disponible, il exécute immédiatement la tâche. Sinon, la tâche est mise en file d'attente ou rejetée si la file est pleine.
+- **`worker_loop`** : Chaque thread attend une tâche ou termine après un délai d'inactivité.
 
-Timer et gestion des threads inactifs
-Un thread dédié surveille les threads inactifs et les termine après un délai d'inactivité spécifié.
+Pseudocode simplifié de la logique :
+
+#codly()
+```pseudocode
+si (file non vide) alors :
+  tâche = retirer_file()
+  exécuter(tâche)
+sinon si (temps_inactivité atteint) :
+  terminer_thread()
+```
+
+== Subtilités concurrentielles
+
+L'implémentation évite les blocages grâce à des conditions de synchronisation, garantissant un accès sûr aux données partagées. La destruction du pool est gérée proprement pour éviter les fuites de threads.
 
 = Tests
 
-Le fichier de test, tst_threadpool.cpp, fournit cinq scénarios couvrant différents cas d'utilisation, notamment la gestion des tâches simultanées, des files d'attente pleines, et l'expiration des threads inactifs.
+== Scénarios de test
+
+Les tests incluent :
+
+1. Gestion de 10 tâches avec 10 threads.
+2. Surcharge de la file d'attente.
+3. Recyclage des threads inactifs.
+
+Pseudocode pour un test :
+
+#codly()
+```pseudocode
+pool = initialiser_pool(10, 50, 100ms)
+envoyer_tâches(pool, 10)
+vérifier(toutes_tâches_finies)
+```
+
+== Résultats
+
+Les tests montrent que le pool respecte les limites et fonctionne efficacement dans des scénarios variés.
 
 = Remarques et conclusion
 
-== Remarques
+== Améliorations possibles
 
-La gestion des threads inactifs pourrait être optimisée pour réduire la consommation de ressources.
-Ajouter des scénarios de tests plus complexes pour des charges irrégulières.
+- Réduction des ressources consommées par les threads inactifs.
+- Ajout de métriques pour surveiller les performances.
 
 == Conclusion
 
-Ce projet a permis de comprendre les concepts de base des pools de threads et leur implémentation efficace à l'aide des moniteurs de Hoare. L'implémentation a satisfait aux exigences fonctionnelles, avec une gestion robuste des tâches et des ressources.
-
+Ce projet illustre les principes de la programmation concurrente, offrant une solution robuste pour gérer les tâches dans des environnements à forte charge.

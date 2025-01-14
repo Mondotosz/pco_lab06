@@ -1,0 +1,1 @@
+/usr/bin/g++ -O3 -DNDEBUG CMakeFiles/PCO_LAB06.dir/tst_threadpool.cpp.o -o PCO_LAB06  -lgtest -lpcosynchro
